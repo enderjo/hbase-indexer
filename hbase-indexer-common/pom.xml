@@ -108,7 +108,7 @@
                 <property name="generated.sources" location="${project.build.directory}/generated-sources" />
 
                 <exec executable="sh">
-                  <arg line="${basedir}/src/saveVersion.sh 1.6-SNAPSHOT ${generated.sources}/java ${project.basedir}/.." />
+                  <arg line="${basedir}/src/saveVersion.sh 1.6-ngdata ${generated.sources}/java ${project.basedir}/.." />
                 </exec>
               </target>
             </configuration>

@@ -41,6 +41,7 @@ import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.mapreduce.TableMapper;
 import org.apache.hadoop.hbase.mapreduce.TableSplit;
 import org.apache.hadoop.io.Text;
+import org.apache.http.impl.client.SystemDefaultHttpClient;
 import org.apache.solr.client.solrj.SolrServerException;
 import org.apache.solr.client.solrj.impl.CloudSolrClient;
 import org.apache.solr.hadoop.SolrInputDocumentWritable;
@@ -267,7 +268,9 @@ public class HBaseIndexerMapper extends TableMapper<Text, SolrInputDocumentWrita
         if (collectionName == null) {
             throw new IllegalStateException("No collection name defined");
         }
-        CloudSolrClient solrServer = new CloudSolrClient(indexZkHost);
+
+        SystemDefaultHttpClient cl = new SystemDefaultHttpClient();
+        CloudSolrClient solrServer = new CloudSolrClient(indexZkHost, cl);
         int zkSessionTimeout = HBaseIndexerConfiguration.getSessionTimeout(context.getConfiguration());
         solrServer.setZkClientTimeout(zkSessionTimeout);
         solrServer.setZkConnectTimeout(zkSessionTimeout);      

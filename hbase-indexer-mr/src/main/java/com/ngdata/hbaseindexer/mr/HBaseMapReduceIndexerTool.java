@@ -26,11 +26,8 @@ import com.ngdata.hbaseindexer.conf.IndexerConf;
 import com.ngdata.hbaseindexer.morphline.MorphlineResultToSolrMapper;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
-import org.apache.hadoop.fs.FSDataOutputStream;
-import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.*;
 import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.mapreduce.TableMapReduceUtil;
 import org.apache.hadoop.io.NullWritable;
@@ -45,48 +42,27 @@ import org.apache.hadoop.util.GenericOptionsParser;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 import org.apache.http.client.HttpClient;
+import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.DefaultHttpClient;
+import org.apache.http.impl.client.HttpClientBuilder;
+import org.apache.http.impl.client.SystemDefaultHttpClient;
 import org.apache.http.impl.conn.PoolingClientConnectionManager;
 import org.apache.solr.client.solrj.SolrClient;
 import org.apache.solr.client.solrj.SolrServerException;
 import org.apache.solr.client.solrj.impl.CloudSolrClient;
 import org.apache.solr.common.cloud.SolrZkClient;
-import org.apache.solr.hadoop.PublicAlphaNumericComparator;
-import org.apache.solr.hadoop.PublicZooKeeperInspector;
-import org.apache.solr.hadoop.SolrCloudPartitioner;
-import org.apache.solr.hadoop.SolrInputDocumentWritable;
-import org.apache.solr.hadoop.SolrOutputFormat;
-import org.apache.solr.hadoop.SolrReducer;
-import org.apache.solr.hadoop.TreeMergeMapper;
-import org.apache.solr.hadoop.TreeMergeOutputFormat;
-import org.apache.solr.hadoop.Utils;
+import org.apache.solr.hadoop.*;
 import org.apache.zookeeper.KeeperException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.BufferedWriter;
-import java.io.ByteArrayInputStream;
-import java.io.File;
-import java.io.FileNotFoundException;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStreamWriter;
-import java.io.Writer;
+import java.io.*;
 import java.net.MalformedURLException;
 import java.text.NumberFormat;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 
 import static com.ngdata.hbaseindexer.indexer.SolrClientFactory.createHttpSolrClients;
-import static com.ngdata.hbaseindexer.util.solr.SolrConnectionParamUtil.getSolrMaxConnectionsPerRoute;
-import static com.ngdata.hbaseindexer.util.solr.SolrConnectionParamUtil.getSolrMaxConnectionsTotal;
-import static com.ngdata.hbaseindexer.util.solr.SolrConnectionParamUtil.getSolrMode;
+import static com.ngdata.hbaseindexer.util.solr.SolrConnectionParamUtil.*;
 import static org.apache.lucene.util.MathUtil.log;
 import static org.apache.solr.hadoop.MapReduceIndexerTool.RESULTS_DIR;
 
@@ -103,6 +79,41 @@ public class HBaseMapReduceIndexerTool extends Configured implements Tool {
 
         int res = ToolRunner.run(new Configuration(), new HBaseMapReduceIndexerTool(), args);
         System.exit(res);
+    }
+
+    static List<List<String>> buildShardUrls(List<Object> urls, Integer numShards) {
+        if (urls == null) {
+            return null;
+        }
+        List<List<String>> shardUrls = new ArrayList<List<String>>(urls.size());
+        List<String> list = null;
+
+        int sz;
+        if (numShards == null) {
+            numShards = urls.size();
+        }
+        sz = (int) Math.ceil(urls.size() / (float) numShards);
+        for (int i = 0; i < urls.size(); i++) {
+            if (i % sz == 0) {
+                list = new ArrayList<String>();
+                shardUrls.add(list);
+            }
+            list.add((String) urls.get(i));
+        }
+
+        return shardUrls;
+    }
+
+    static void goodbye(Job job, long startTime) {
+        float secs = (System.currentTimeMillis() - startTime) / 1000.0f;
+        if (job != null) {
+            LOG.info("Succeeded with job: " + getJobInfo(job));
+        }
+        LOG.info("Success. Done. Program took {} secs. Goodbye.", secs);
+    }
+
+    private static String getJobInfo(Job job) {
+        return "jobName: " + job.getJobName() + ", jobId: " + job.getJobID();
     }
 
     @Override
@@ -200,7 +211,9 @@ public class HBaseMapReduceIndexerTool extends Configured implements Tool {
                         hbaseIndexingOpts.maxSegments});
 
         if (hbaseIndexingOpts.isDirectWrite()) {
-            CloudSolrClient solrServer = new CloudSolrClient(hbaseIndexingOpts.zkHost);
+            SystemDefaultHttpClient cl = new SystemDefaultHttpClient();
+            CloudSolrClient solrServer = new CloudSolrClient(hbaseIndexingOpts.zkHost, cl);
+
             int zkSessionTimeout = HBaseIndexerConfiguration.getSessionTimeout(conf);
             solrServer.setZkClientTimeout(zkSessionTimeout);
             solrServer.setZkConnectTimeout(zkSessionTimeout);
@@ -256,114 +269,9 @@ public class HBaseMapReduceIndexerTool extends Configured implements Tool {
         }
     }
 
-    private void clearSolr(Map<String, String> indexConnectionParams) throws SolrServerException, IOException {
-        Set<SolrClient> servers = createSolrClients(indexConnectionParams);
-        for (SolrClient server : servers) {
-            server.deleteByQuery("*:*");
-            server.commit(false, false);
-            server.shutdown();
-        }
-    }
-
-    private void commitSolr(Map<String, String> indexConnectionParams) throws SolrServerException, IOException {
-        Set<SolrClient> servers = createSolrClients(indexConnectionParams);
-        for (SolrClient server : servers) {
-            server.commit(false, false);
-            server.shutdown();
-        }
-    }
-
-    private Set<SolrClient> createSolrClients(Map<String, String> indexConnectionParams) throws MalformedURLException {
-        String solrMode = getSolrMode(indexConnectionParams);
-        if (solrMode.equals("cloud")) {
-            String indexZkHost = indexConnectionParams.get(SolrConnectionParams.ZOOKEEPER);
-            String collectionName = indexConnectionParams.get(SolrConnectionParams.COLLECTION);
-            CloudSolrClient solrServer = new CloudSolrClient(indexZkHost);
-            int zkSessionTimeout = HBaseIndexerConfiguration.getSessionTimeout(getConf());
-            solrServer.setZkClientTimeout(zkSessionTimeout);
-            solrServer.setZkConnectTimeout(zkSessionTimeout);
-            solrServer.setDefaultCollection(collectionName);
-            return Collections.singleton((SolrClient)solrServer);
-        } else if (solrMode.equals("classic")) {
-            PoolingClientConnectionManager connectionManager = new PoolingClientConnectionManager();
-            connectionManager.setDefaultMaxPerRoute(getSolrMaxConnectionsPerRoute(indexConnectionParams));
-            connectionManager.setMaxTotal(getSolrMaxConnectionsTotal(indexConnectionParams));
-
-            HttpClient httpClient = new DefaultHttpClient(connectionManager);
-            return new HashSet<SolrClient>(createHttpSolrClients(indexConnectionParams, httpClient));
-        } else {
-            throw new RuntimeException("Only 'cloud' and 'classic' are valid values for solr.mode, but got " + solrMode);
-        }
-
-    }
-
-    static List<List<String>> buildShardUrls(List<Object> urls, Integer numShards) {
-        if (urls == null) {
-            return null;
-        }
-        List<List<String>> shardUrls = new ArrayList<List<String>>(urls.size());
-        List<String> list = null;
-
-        int sz;
-        if (numShards == null) {
-            numShards = urls.size();
-        }
-        sz = (int)Math.ceil(urls.size() / (float)numShards);
-        for (int i = 0; i < urls.size(); i++) {
-            if (i % sz == 0) {
-                list = new ArrayList<String>();
-                shardUrls.add(list);
-            }
-            list.add((String)urls.get(i));
-        }
-
-        return shardUrls;
-    }
-
-    // do the same as if the user had typed 'hadoop ... --files <file>'
-    private void addDistributedCacheFile(File file, Configuration conf) throws IOException {
-        String HADOOP_TMP_FILES = "tmpfiles"; // see Hadoop's GenericOptionsParser
-        String tmpFiles = conf.get(HADOOP_TMP_FILES, "");
-        if (tmpFiles.length() > 0) { // already present?
-            tmpFiles = tmpFiles + ",";
-        }
-        GenericOptionsParser parser = new GenericOptionsParser(
-                new Configuration(conf),
-                new String[]{"--files", file.getCanonicalPath()});
-        String additionalTmpFiles = parser.getConfiguration().get(HADOOP_TMP_FILES);
-        assert additionalTmpFiles != null;
-        assert additionalTmpFiles.length() > 0;
-        tmpFiles += additionalTmpFiles;
-        conf.set(HADOOP_TMP_FILES, tmpFiles);
-
-    }
-
-    private boolean waitForCompletion(Job job, boolean isVerbose)
-            throws IOException, InterruptedException, ClassNotFoundException {
-
-        LOG.debug("Running job: " + getJobInfo(job));
-        boolean success = job.waitForCompletion(isVerbose);
-        if (!success) {
-            LOG.error("Job failed! " + getJobInfo(job));
-        }
-        return success;
-    }
-
-    static void goodbye(Job job, long startTime) {
-        float secs = (System.currentTimeMillis() - startTime) / 1000.0f;
-        if (job != null) {
-            LOG.info("Succeeded with job: " + getJobInfo(job));
-        }
-        LOG.info("Success. Done. Program took {} secs. Goodbye.", secs);
-    }
-
-    private static String getJobInfo(Job job) {
-        return "jobName: " + job.getJobName() + ", jobId: " + job.getJobID();
-    }
-
     int runIndexingPipeline(Job job, JobProcessCallback callback, Configuration conf, HBaseIndexingOptions options,
-            long programStartTime, FileSystem fs, Path fullInputList, long numFiles,
-            int realMappers, int reducers)
+                            long programStartTime, FileSystem fs, Path fullInputList, long numFiles,
+                            int realMappers, int reducers)
             throws IOException, KeeperException, InterruptedException,
             ClassNotFoundException, FileNotFoundException {
         long startTime;
@@ -453,7 +361,7 @@ public class HBaseMapReduceIndexerTool extends Configured implements Tool {
 
         int mtreeMergeIterations = 0;
         if (reducers > options.shards) {
-            mtreeMergeIterations = (int)Math.round(log(options.fanout, reducers / options.shards));
+            mtreeMergeIterations = (int) Math.round(log(options.fanout, reducers / options.shards));
         }
         LOG.debug("MTree merge iterations to do: {}", mtreeMergeIterations);
         int mtreeMergeIteration = 1;
@@ -536,6 +444,77 @@ public class HBaseMapReduceIndexerTool extends Configured implements Tool {
 
         goodbye(job, programStartTime);
         return 0;
+    }
+
+    private void clearSolr(Map<String, String> indexConnectionParams) throws SolrServerException, IOException {
+        Set<SolrClient> servers = createSolrClients(indexConnectionParams);
+        for (SolrClient server : servers) {
+            server.deleteByQuery("*:*");
+            server.commit(false, false);
+            server.shutdown();
+        }
+    }
+
+    private void commitSolr(Map<String, String> indexConnectionParams) throws SolrServerException, IOException {
+        Set<SolrClient> servers = createSolrClients(indexConnectionParams);
+        for (SolrClient server : servers) {
+            server.commit(false, false);
+            server.shutdown();
+        }
+    }
+
+    private Set<SolrClient> createSolrClients(Map<String, String> indexConnectionParams) throws MalformedURLException {
+        String solrMode = getSolrMode(indexConnectionParams);
+        if (solrMode.equals("cloud")) {
+            String indexZkHost = indexConnectionParams.get(SolrConnectionParams.ZOOKEEPER);
+            String collectionName = indexConnectionParams.get(SolrConnectionParams.COLLECTION);
+            SystemDefaultHttpClient cl = new SystemDefaultHttpClient();
+            CloudSolrClient solrServer = new CloudSolrClient(indexZkHost, cl);
+            int zkSessionTimeout = HBaseIndexerConfiguration.getSessionTimeout(getConf());
+            solrServer.setZkClientTimeout(zkSessionTimeout);
+            solrServer.setZkConnectTimeout(zkSessionTimeout);
+            solrServer.setDefaultCollection(collectionName);
+            return Collections.singleton((SolrClient) solrServer);
+        } else if (solrMode.equals("classic")) {
+            PoolingClientConnectionManager connectionManager = new PoolingClientConnectionManager();
+            connectionManager.setDefaultMaxPerRoute(getSolrMaxConnectionsPerRoute(indexConnectionParams));
+            connectionManager.setMaxTotal(getSolrMaxConnectionsTotal(indexConnectionParams));
+
+            HttpClient httpClient = new DefaultHttpClient(connectionManager);
+            return new HashSet<SolrClient>(createHttpSolrClients(indexConnectionParams, httpClient));
+        } else {
+            throw new RuntimeException("Only 'cloud' and 'classic' are valid values for solr.mode, but got " + solrMode);
+        }
+
+    }
+
+    // do the same as if the user had typed 'hadoop ... --files <file>'
+    private void addDistributedCacheFile(File file, Configuration conf) throws IOException {
+        String HADOOP_TMP_FILES = "tmpfiles"; // see Hadoop's GenericOptionsParser
+        String tmpFiles = conf.get(HADOOP_TMP_FILES, "");
+        if (tmpFiles.length() > 0) { // already present?
+            tmpFiles = tmpFiles + ",";
+        }
+        GenericOptionsParser parser = new GenericOptionsParser(
+                new Configuration(conf),
+                new String[]{"--files", file.getCanonicalPath()});
+        String additionalTmpFiles = parser.getConfiguration().get(HADOOP_TMP_FILES);
+        assert additionalTmpFiles != null;
+        assert additionalTmpFiles.length() > 0;
+        tmpFiles += additionalTmpFiles;
+        conf.set(HADOOP_TMP_FILES, tmpFiles);
+
+    }
+
+    private boolean waitForCompletion(Job job, boolean isVerbose)
+            throws IOException, InterruptedException, ClassNotFoundException {
+
+        LOG.debug("Running job: " + getJobInfo(job));
+        boolean success = job.waitForCompletion(isVerbose);
+        if (!success) {
+            LOG.error("Job failed! " + getJobInfo(job));
+        }
+        return success;
     }
 
     private int createTreeMergeInputDirList(Job job, Path outputReduceDir, FileSystem fs, Path fullInputList)

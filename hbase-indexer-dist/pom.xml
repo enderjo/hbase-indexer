@@ -64,7 +64,7 @@
               <skipAssembly>false</skipAssembly>
               <tarLongFileMode>gnu</tarLongFileMode>
               <appendAssemblyId>false</appendAssemblyId>
-              <finalName>hbase-indexer-1.6-SNAPSHOT</finalName>
+              <finalName>hbase-indexer-1.6-ngdata</finalName>
               <descriptors>
                 <descriptor>src/assembly/assembly.xml</descriptor>
               </descriptors>
@@ -109,7 +109,7 @@
                   <groupname>root</groupname>
                   <sources>
                     <source>
-                      <location>${project.build.directory}/hbase-indexer-1.6-SNAPSHOT/hbase-indexer-1.6-SNAPSHOT/</location>
+                      <location>${project.build.directory}/hbase-indexer-1.6-ngdata/hbase-indexer-1.6-ngdata/</location>
                     </source>
                   </sources>
                 </mapping>

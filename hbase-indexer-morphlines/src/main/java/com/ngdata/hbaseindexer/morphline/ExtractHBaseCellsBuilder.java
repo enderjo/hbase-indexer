@@ -15,25 +15,6 @@
  */
 package com.ngdata.hbaseindexer.morphline;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.List;
-import java.util.NavigableMap;
-
-import org.apache.hadoop.hbase.client.Result;
-import org.apache.hadoop.hbase.util.Bytes;
-
-import org.kitesdk.morphline.api.Command;
-import org.kitesdk.morphline.api.CommandBuilder;
-import org.kitesdk.morphline.api.MorphlineCompilationException;
-import org.kitesdk.morphline.api.MorphlineContext;
-import org.kitesdk.morphline.api.Record;
-import org.kitesdk.morphline.base.AbstractCommand;
-import org.kitesdk.morphline.base.Configs;
-import org.kitesdk.morphline.base.Fields;
-import org.kitesdk.morphline.base.Validator;
 import com.google.common.base.Preconditions;
 import com.ngdata.hbaseindexer.parse.ByteArrayExtractor;
 import com.ngdata.hbaseindexer.parse.ByteArrayValueMapper;
@@ -42,12 +23,26 @@ import com.ngdata.hbaseindexer.parse.extract.PrefixMatchingCellExtractor;
 import com.ngdata.hbaseindexer.parse.extract.PrefixMatchingQualifierExtractor;
 import com.ngdata.hbaseindexer.parse.extract.SingleCellExtractor;
 import com.typesafe.config.Config;
+import org.apache.commons.lang.StringUtils;
+import org.apache.hadoop.hbase.client.Result;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.kitesdk.morphline.api.*;
+import org.kitesdk.morphline.base.AbstractCommand;
+import org.kitesdk.morphline.base.Configs;
+import org.kitesdk.morphline.base.Fields;
+import org.kitesdk.morphline.base.Validator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.*;
 
 /**
  * Command that extracts cells from the given HBase Result, and transforms the resulting values into a
  * SolrInputDocument.
  */
 public final class ExtractHBaseCellsBuilder implements CommandBuilder {
+
+    private static final Logger LOG = LoggerFactory.getLogger(ExtractHBaseCellsBuilder.class);
 
     @Override
     public Collection<String> getNames() {
@@ -62,9 +57,31 @@ public final class ExtractHBaseCellsBuilder implements CommandBuilder {
     // /////////////////////////////////////////////////////////////////////////////
     // Nested classes:
     // /////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * Specifies where values to index should be extracted from in an HBase {@code KeyValue}.
+     */
+    private enum LowerCaseValueSource {
+        /**
+         * Extract values to index from the column qualifier of a {@code KeyValue}.
+         * we expect lowercase in config file!
+         */
+        qualifier,
+
+        /**
+         * Extract values to index from the cell value of a {@code KeyValue}.
+         * we expect lowercase in config file!
+         */
+        value
+    }
+
+    // /////////////////////////////////////////////////////////////////////////////
+    // Nested classes:
+    // /////////////////////////////////////////////////////////////////////////////
+
     private static final class ExtractHBaseCells extends AbstractCommand {
 
-        private final List<Mapping> mappings = new ArrayList();
+        private final List<Mapping> mappings = new ArrayList<>();
 
         public ExtractHBaseCells(CommandBuilder builder, Config config, Command parent, Command child, MorphlineContext context) {
             super(builder, config, parent, child, context);
@@ -76,13 +93,13 @@ public final class ExtractHBaseCellsBuilder implements CommandBuilder {
 
         @Override
         protected boolean doProcess(Record record) {
-            Result result = (Result)record.getFirstValue(Fields.ATTACHMENT_BODY);
+            Result result = (Result) record.getFirstValue(Fields.ATTACHMENT_BODY);
             Preconditions.checkNotNull(result);
             removeAttachments(record);
             for (Mapping mapping : mappings) {
                 mapping.apply(result, record);
             }
-            // pass record to next command in chain:      
+            // pass record to next command in chain:
             return super.doProcess(record);
         }
 
@@ -98,6 +115,7 @@ public final class ExtractHBaseCellsBuilder implements CommandBuilder {
     // /////////////////////////////////////////////////////////////////////////////
     // Nested classes:
     // /////////////////////////////////////////////////////////////////////////////
+
     private static final class Mapping {
 
         private final String inputColumn;
@@ -110,42 +128,54 @@ public final class ExtractHBaseCellsBuilder implements CommandBuilder {
         private final ByteArrayExtractor extractor;
         private final String type;
         private final ByteArrayValueMapper byteArrayMapper;
+        /**
+         * 指定字段是否允许为空值 null或"",默认为true
+         */
+        private final boolean isAllowEmpty;
 
-        // also see ByteArrayExtractors
+        /**
+         * also see ByteArrayExtractors
+         *
+         * @param config
+         * @param context
+         */
+        //
         public Mapping(Config config, MorphlineContext context) {
             Configs configs = new Configs();
+            this.isAllowEmpty = configs.getBoolean(config, "isAllowEmpty", true);
             this.inputColumn = resolveColumnName(configs.getString(config, "inputColumn"));
             this.columnFamily = Bytes.toBytes(splitFamilyAndQualifier(inputColumn)[0]);
-            
+
             String qualifierString = splitFamilyAndQualifier(inputColumn)[1];
             this.isWildCard = qualifierString.endsWith("*");
             if (isWildCard) {
                 qualifierString = qualifierString.substring(0, qualifierString.length() - 1);
             }
             this.qualifier = Bytes.toBytes(qualifierString);
-            
+
             String outputField = configs.getString(config, "outputField", null);
             this.outputFieldNames = configs.getStringList(config, "outputFields", null);
             if (outputField == null && outputFieldNames == null) {
-              throw new MorphlineCompilationException("Either outputField or outputFields must be defined", config);
+                throw new MorphlineCompilationException("Either outputField or outputFields must be defined", config);
             }
             if (outputField != null && outputFieldNames != null) {
-              throw new MorphlineCompilationException("Must not define both outputField and outputFields at the same time", config);
+                throw new MorphlineCompilationException("Must not define both outputField and outputFields at the same time", config);
             }
             if (outputField == null) {
-              this.isDynamicOutputFieldName = false;
-              this.outputFieldName = null;
+                this.isDynamicOutputFieldName = false;
+                this.outputFieldName = null;
             } else {
-              this.isDynamicOutputFieldName = outputField.endsWith("*");
-              if (isDynamicOutputFieldName) {
-                  this.outputFieldName = outputField.substring(0, outputField.length() - 1);
-              } else {
-                  this.outputFieldName = outputField;
-              }
+                this.isDynamicOutputFieldName = outputField.endsWith("*");
+                if (isDynamicOutputFieldName) {
+                    this.outputFieldName = outputField.substring(0, outputField.length() - 1);
+                } else {
+                    this.outputFieldName = outputField;
+                }
             }
-            
+
             this.type = configs.getString(config, "type", "byte[]");
-            if (type.equals("byte[]")) { // pass through byte[] to downstream morphline commands without conversion
+            // pass through byte[] to downstream morphline commands without conversion
+            if (type.equals("byte[]")) {
                 this.byteArrayMapper = new ByteArrayValueMapper() {
                     @Override
                     public Collection map(byte[] input) {
@@ -173,19 +203,19 @@ public final class ExtractHBaseCellsBuilder implements CommandBuilder {
                     throw new IllegalArgumentException("Can't create a non-prefix-based qualifier extractor");
                 }
             }
-            
+
             configs.validateArguments(config);
             if (context instanceof HBaseMorphlineContext) {
-                ((HBaseMorphlineContext)context).getExtractors().add(this.extractor);
+                ((HBaseMorphlineContext) context).getExtractors().add(this.extractor);
             }
         }
 
-        /**
-         * Override for custom name resolution, if desired. For example you could override this to translate human
-         * readable names to Kiji-encoded names.
-         */
-        protected String resolveColumnName(String inputColumn) {
-            return inputColumn;
+        private static String[] splitFamilyAndQualifier(String fieldValueExpression) {
+            String[] splits = fieldValueExpression.split(":", 2);
+            if (splits.length != 2) {
+                throw new IllegalArgumentException("Invalid field value expression: " + fieldValueExpression);
+            }
+            return splits;
         }
 
         public void apply(Result result, Record record) {
@@ -198,71 +228,80 @@ public final class ExtractHBaseCellsBuilder implements CommandBuilder {
             }
         }
 
+        /**
+         * Override for custom name resolution, if desired. For example you could override this to translate human
+         * readable names to Kiji-encoded names.
+         */
+        protected String resolveColumnName(String inputColumn) {
+            return inputColumn;
+        }
+
+        /**
+         * 检测是否为空值(null或者"")
+         *
+         * @param value 需要校验的值
+         * @return boolean
+         */
+        private boolean isEmpty(Object value) {
+            if (value == null) {
+                return true;
+            }
+
+            return StringUtils.trimToNull(value.toString()) == null;
+        }
+
         private void extractWithSingleOutputField(Result result, Record record) {
             Iterator<byte[]> iter = extractor.extract(result).iterator();
             while (iter.hasNext()) {
                 for (Object value : byteArrayMapper.map(iter.next())) {
+                    if (!isAllowEmpty && isEmpty(value)) {
+                        LOG.debug("the value of \"" + inputColumn + "\" is empty, this column will be ignored!");
+                        continue;
+                    }
                     record.put(outputFieldName, value);
                 }
             }
         }
-      
+
         private void extractWithMultipleOutputFieldNames(Result result, Record record) {
             Iterator<byte[]> iter = extractor.extract(result).iterator();
             for (int i = 0; i < outputFieldNames.size() && iter.hasNext(); i++) {
                 byte[] input = iter.next();
                 String outputField = outputFieldNames.get(i);
-                if (outputField.length() > 0) { // empty column name indicates omit this field on output
+                // empty column name indicates omit this field on output
+                if (outputField.length() > 0) {
                     for (Object value : byteArrayMapper.map(input)) {
+                        if (!isAllowEmpty && isEmpty(value)) {
+                            LOG.debug("the value of \"" + inputColumn + "\" is empty, this column will be ignored!");
+                            continue;
+                        }
                         record.put(outputField, value);
                     }
                 }
-            }              
-        }
-        
-        private void extractWithDynamicOutputFieldNames(Result result, Record record) {
-          Iterator<byte[]> iter = extractor.extract(result).iterator();
-          NavigableMap<byte[], byte[]> qualifiersToValues = result.getFamilyMap(columnFamily);
-          if (qualifiersToValues != null) {
-              for (byte[] matchingQualifier : qualifiersToValues.navigableKeySet().tailSet(qualifier)) {
-                  if (Bytes.startsWith(matchingQualifier, qualifier)) {
-                      byte[] tail = Bytes.tail(matchingQualifier, matchingQualifier.length - qualifier.length);
-                      String outputField = outputFieldName + Bytes.toString(tail);                        
-                      for (Object value : byteArrayMapper.map(iter.next())) {
-                          record.put(outputField, value);
-                      }
-                  } else {
-                      break;
-                  }
-              }
-              assert !iter.hasNext();
-          }
-        }
-      
-        private static String[] splitFamilyAndQualifier(String fieldValueExpression) {
-            String[] splits = fieldValueExpression.split(":", 2);
-            if (splits.length != 2) {
-                throw new IllegalArgumentException("Invalid field value expression: " + fieldValueExpression);
             }
-            return splits;
         }
-    }
 
-    // /////////////////////////////////////////////////////////////////////////////
-    // Nested classes:
-    // /////////////////////////////////////////////////////////////////////////////
-    /**
-     * Specifies where values to index should be extracted from in an HBase {@code KeyValue}.
-     */
-    private static enum LowerCaseValueSource {
-        /**
-         * Extract values to index from the column qualifier of a {@code KeyValue}.
-         */
-        qualifier, // we expect lowercase in config file!
-
-        /**
-         * Extract values to index from the cell value of a {@code KeyValue}.
-         */
-        value // we expect lowercase in config file!
+        private void extractWithDynamicOutputFieldNames(Result result, Record record) {
+            Iterator<byte[]> iter = extractor.extract(result).iterator();
+            NavigableMap<byte[], byte[]> qualifiersToValues = result.getFamilyMap(columnFamily);
+            if (qualifiersToValues != null) {
+                for (byte[] matchingQualifier : qualifiersToValues.navigableKeySet().tailSet(qualifier)) {
+                    if (Bytes.startsWith(matchingQualifier, qualifier)) {
+                        byte[] tail = Bytes.tail(matchingQualifier, matchingQualifier.length - qualifier.length);
+                        String outputField = outputFieldName + Bytes.toString(tail);
+                        for (Object value : byteArrayMapper.map(iter.next())) {
+                            if (!isAllowEmpty && isEmpty(value)) {
+                                LOG.debug("the value of \"" + inputColumn + "\" is empty, this column will be ignored!");
+                                continue;
+                            }
+                            record.put(outputField, value);
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                assert !iter.hasNext();
+            }
+        }
     }
 }

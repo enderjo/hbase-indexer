@@ -15,20 +15,20 @@
  */
 package com.ngdata.hbaseindexer.parse;
 
-import java.math.BigDecimal;
-import java.util.Collection;
-
 import com.google.common.collect.ImmutableList;
+import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.util.Bytes;
+
+import java.math.BigDecimal;
+import java.util.Collection;
 
 /**
  * Contains factory methods for {@link ByteArrayValueMapper}s.
  */
 public class ByteArrayValueMappers {
-
-    private static Log log = LogFactory.getLog(ByteArrayValueMappers.class);
+    private static final Log log = LogFactory.getLog(ByteArrayValueMappers.class);
 
     private static final ByteArrayValueMapper INT_MAPPER = new AbstractByteValueMapper(int.class) {
 
@@ -37,7 +37,6 @@ public class ByteArrayValueMappers {
             return Bytes.toInt(input);
         }
     };
-
     private static final ByteArrayValueMapper LONG_MAPPER = new AbstractByteValueMapper(long.class) {
 
         @Override
@@ -45,7 +44,6 @@ public class ByteArrayValueMappers {
             return Bytes.toLong(input);
         }
     };
-
     private static final ByteArrayValueMapper STRING_MAPPER = new AbstractByteValueMapper(String.class) {
 
         @Override
@@ -54,7 +52,6 @@ public class ByteArrayValueMappers {
         }
 
     };
-
     private static final ByteArrayValueMapper BOOLEAN_MAPPER = new AbstractByteValueMapper(boolean.class) {
 
         @Override
@@ -62,7 +59,6 @@ public class ByteArrayValueMappers {
             return Bytes.toBoolean(input);
         }
     };
-
     private static final ByteArrayValueMapper FLOAT_MAPPER = new AbstractByteValueMapper(float.class) {
 
         @Override
@@ -70,7 +66,6 @@ public class ByteArrayValueMappers {
             return Bytes.toFloat(input);
         }
     };
-
     private static final ByteArrayValueMapper DOUBLE_MAPPER = new AbstractByteValueMapper(double.class) {
 
         @Override
@@ -78,7 +73,6 @@ public class ByteArrayValueMappers {
             return Bytes.toDouble(input);
         }
     };
-
     private static final ByteArrayValueMapper SHORT_MAPPER = new AbstractByteValueMapper(short.class) {
 
         @Override
@@ -86,7 +80,6 @@ public class ByteArrayValueMappers {
             return Bytes.toShort(input);
         }
     };
-
     private static final ByteArrayValueMapper BIG_DECIMAL_MAPPER = new AbstractByteValueMapper(BigDecimal.class) {
 
         @Override
@@ -95,11 +88,33 @@ public class ByteArrayValueMappers {
         }
     };
 
+
+    /**
+     * UTC转换类
+     */
+    private static final ByteArrayValueMapper UTC_DATE_MAPPER = new AbstractByteValueMapper(String.class) {
+
+        /**
+         * transform DateTime [yyyy-MM-dd HH:mm:ss] to UTC [yyyy-MM-ddTHH:mm:ssZ]
+         */
+        @Override
+        protected Object mapInternal(byte[] input) {
+            final String T = "T";
+            final String Z = "Z";
+            String str = Bytes.toString(input);
+            if (StringUtils.isNotEmpty(str) && !str.contains(T)) {
+                str = str.replace(" ", T).concat(Z);
+            }
+
+            return str;
+        }
+    };
+
     /**
      * Get a {@link ByteArrayValueMapper} for a given type. The type can be the name of a type that is supported by
      * org.apache.hadoop.hbase.util.Bytes.toXXX (e.g. long, int, double), or it can be the name of a class that
      * implements the {@link ByteArrayValueMapper} interface.
-     * 
+     *
      * @param mapperType name of the mapper type
      * @return the requested mapper
      */
@@ -120,6 +135,8 @@ public class ByteArrayValueMappers {
             return SHORT_MAPPER;
         } else if ("bigdecimal".equals(mapperType)) {
             return BIG_DECIMAL_MAPPER;
+        } else if ("utcdate".equals(mapperType)) {
+            return UTC_DATE_MAPPER;
         } else {
             return instantiateCustomMapper(mapperType);
         }
@@ -134,7 +151,7 @@ public class ByteArrayValueMappers {
         }
 
         if (obj instanceof ByteArrayValueMapper) {
-            return (ByteArrayValueMapper)obj;
+            return (ByteArrayValueMapper) obj;
         } else {
             throw new IllegalArgumentException(obj.getClass() + " does not implement "
                     + ByteArrayValueMapper.class.getName());
@@ -149,8 +166,6 @@ public class ByteArrayValueMappers {
             this.targetType = targetType;
         }
 
-        protected abstract Object mapInternal(byte[] input);
-
         @Override
         public Collection<Object> map(byte[] input) {
             try {
@@ -162,6 +177,7 @@ public class ByteArrayValueMappers {
                 return ImmutableList.of();
             }
         }
-    }
 
+        protected abstract Object mapInternal(byte[] input);
+    }
 }

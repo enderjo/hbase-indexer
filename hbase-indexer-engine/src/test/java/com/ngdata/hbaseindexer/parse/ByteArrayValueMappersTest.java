@@ -15,15 +15,15 @@
  */
 package com.ngdata.hbaseindexer.parse;
 
-import static org.junit.Assert.assertEquals;
+import com.google.common.collect.Lists;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.junit.Test;
 
 import java.math.BigDecimal;
 import java.util.Collection;
 import java.util.Collections;
 
-import com.google.common.collect.Lists;
-import org.apache.hadoop.hbase.util.Bytes;
-import org.junit.Test;
+import static org.junit.Assert.assertEquals;
 
 public class ByteArrayValueMappersTest {
 
@@ -72,7 +72,7 @@ public class ByteArrayValueMappersTest {
     @Test
     public void testGetValueMapper_Short() {
         ByteArrayValueMapper mapper = ByteArrayValueMappers.getMapper("short");
-        assertEquals(Lists.newArrayList((short)42), mapper.map(Bytes.toBytes((short)42)));
+        assertEquals(Lists.newArrayList((short) 42), mapper.map(Bytes.toBytes((short) 42)));
     }
 
     @Test
@@ -85,6 +85,12 @@ public class ByteArrayValueMappersTest {
     public void testGetValueMapper_CustomMapperClass() {
         ByteArrayValueMapper mapper = ByteArrayValueMappers.getMapper(MockValueMapper.class.getName());
         assertEquals(Lists.newArrayList("A", "B", "C"), mapper.map(Bytes.toBytes("dummy value")));
+    }
+
+    @Test
+    public void testGetValueMapper_UTCDateClass() {
+        ByteArrayValueMapper mapper = ByteArrayValueMappers.getMapper("utcdate");
+        assertEquals(Lists.newArrayList("2019-01-03T00:00:00Z"), mapper.map(Bytes.toBytes("2019-01-03 00:00:00")));
     }
 
     @Test(expected = IllegalArgumentException.class)
@@ -100,7 +106,7 @@ public class ByteArrayValueMappersTest {
     public static class MockValueMapper implements ByteArrayValueMapper {
         @Override
         public Collection<Object> map(byte[] input) {
-            return Lists.<Object> newArrayList("A", "B", "C");
+            return Lists.<Object>newArrayList("A", "B", "C");
         }
     }
 
